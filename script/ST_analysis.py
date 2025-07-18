@@ -4,8 +4,10 @@ Last update: 20250626
 Description: spatial transcriptome analysis pipeline.
 Usage:
 python3 ST_analysis.py -i /media/data1/PhD/ChingYaLin/VisiumHD_Colon/binned_outputs/square_008um \
-                -o /media/data1/PhD/ChingYaLin/writing_reso1 \
-                -p /media/data1/PhD/ChingYaLin/VisiumHD_Colon/8um_squares_annotation_pathologist.csv
+                -o /media/data1/PhD/ChingYaLin/ST_analysis_test/write_first \
+                -p /media/data1/PhD/ChingYaLin/VisiumHD_Colon/8um_squares_annotation_pathologist.csv \
+                -r 0.6 \
+                --cpus 4
 """
 
 ### Package import
@@ -171,15 +173,20 @@ def clustering(adata, resolution):
     '''
     
     print('Exporting UMAP...')
-    ########### here need to save figure
-    fig, ax = plt.subplots(dpi=300, figsize=(5,5))
+    fig, ax = plt.subplots(dpi=300, figsize=(12,12))
     sc.pl.umap(adata, color='leiden', ax=ax, legend_loc='on data',
            frameon=False, legend_fontsize='small', legend_fontoutline=2, legend_fontweight='normal',
            use_raw=False, show=False, title='leiden, resolution='+str(resolution))
     
-    print("Exporting spatial plot")
+    fig.savefig(os.path.join(figure_save, '1.uamp_with_cluster.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print("Exporting spatial plot...")
     # Cluster result on tissue location
-    sq.pl.spatial_scatter(adata, color="leiden",img= False, size=2)
+    fig, ax = plt.subplots(dpi=300)
+    sq.pl.spatial_scatter(adata, color="leiden",fig=fig, ax=ax, img= False, size=2)
+    fig.savefig(os.path.join(figure_save, '2.tissue_with_cluster.png'), dpi=300, bbox_inches='tight', transparent=False)
+    plt.close()
     print("Clustering...Done")
 
     return adata
@@ -238,7 +245,8 @@ def annotation(adata, groups, species, output, cpus):
             ncol=1, fontsize=16
         )
         fig.subplots_adjust(right=0.85)  # 給 legend 多一點空間
-        plt.show()
+        fig.savefig(os.path.join(figure_save, '3.umap_with_cluster(custom).png'), dpi=300, bbox_inches='tight')
+        plt.close()
 
         # Table: top 5 annotation
         fig, ax = plt.subplots(dpi=300)
@@ -254,10 +262,11 @@ def annotation(adata, groups, species, output, cpus):
                 table._cells[cell].set_color('lightblue')
                 table._cells[cell].set_height(0.05)
 
-        ax.set_title('Top 5 annotation', y=1.02)
+        ax.set_title('Top 5 annotation')
         fig.subplots_adjust(left=0.1, right=0.9)
         plt.tight_layout(rect=[0, 0, 1, 0.95])
-        plt.show()
+        fig.savefig(os.path.join(figure_save, '4.top_5_annotation.png'), dpi=300, bbox_inches='tight')
+        plt.close()
 
     return adata
 
@@ -310,8 +319,9 @@ args = parser.parse_args()
 
 
 # read input files
-global pdf_save, results_file
-pdf_save = PdfPages(f'{args.output}/results.pdf') 
+global figure_save , results_file
+figure_save = os.path.join(args.output, 'figures')
+os.makedirs(figure_save, exist_ok=True) 
 results_file = os.path.join(args.output, 'scanpyobj.h5ad')
 
 ### Main
@@ -328,11 +338,6 @@ adata = findDEG(adata, groups, args.output)
 
 
 
-
-
-
-# close PDF file
-pdf_save.close()
 
 if args.clusters:
     results_file = '{}.sub.h5ad'.format(results_file.rsplit('.',1)[0])
