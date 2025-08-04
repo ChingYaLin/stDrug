@@ -62,10 +62,11 @@ def readFile(input_path, pathologist_path):
         adata.var_names_make_unique() # unique duplicate gene name
 
         # Add the pathologist annotation to adata table
-        anno_df = pd.read_csv(pathologist_path, header=None, sep='\t', index_col=0)
-        anno_df.columns = ['tissue_annotation_pathologist']  # 幫它加一個欄名
-        adata.obs['tissue_annotation_pathologist'] = anno_df['tissue_annotation_pathologist']
-        adata.obs['tissue_annotation_pathologist'] = adata.obs['tissue_annotation_pathologist'].astype('category')
+        if pathologist_path != "none":
+            anno_df = pd.read_csv(pathologist_path, header=None, sep='\t', index_col=0)
+            anno_df.columns = ['tissue_annotation_pathologist']  # 幫它加一個欄名
+            adata.obs['tissue_annotation_pathologist'] = anno_df['tissue_annotation_pathologist']
+            adata.obs['tissue_annotation_pathologist'] = adata.obs['tissue_annotation_pathologist'].astype('category')
         print('Reading files...Done')
         print(f'n_obs x n_vars = {adata.n_obs} x {adata.n_vars}')
 
@@ -108,8 +109,9 @@ def preprocessing(adata, impute = False):
         warnings.simplefilter("ignore")
         ax = sc.pl.violin(adata[adata.obs.sample(5000).index].copy(), # random choose 5000 spot to plot
                 ["total_counts", "n_genes_by_counts", "pct_counts_mt"], jitter=0.4, palette="pastel", show=False)
-        ax.set_title("QC Metrics Violin Plot")
-        plt.show()
+        fig = ax[0].get_figure() if isinstance(ax, list) else ax.get_figure()
+        fig.suptitle("QC Metrics Violin Plot")  # setting the title
+        fig.savefig(os.path.join(figure_save, 'QC_metrix_violin_plots.png'), dpi=300, bbox_inches='tight')
 
     if not (adata.obs.pct_counts_mt == 0).all():
         adata = adata[adata.obs.pct_counts_mt < 30, :]
@@ -268,6 +270,12 @@ def annotation(adata, groups, species, output, cpus):
         fig.savefig(os.path.join(figure_save, '4.top_5_annotation.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
+        # Spatial plot with annotation
+        fig, ax = plt.subplots(dpi=300, figsize=(5, 5))
+        sq.pl.spatial_scatter(adata, ax=ax, color="cell_type",img= False, size=2)
+        fig.savefig(os.path.join(figure_save, '5.tissue_with_annotation.png'), dpi=300, bbox_inches='tight', transparent=False)
+        plt.close()
+
     return adata
 
 def findDEG(adata, groups, output):
@@ -295,6 +303,20 @@ def findDEG(adata, groups, output):
 
     return adata
 
+def pathologist_plot(adata):
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5), dpi=300)
+
+    # plot umap
+    sc.pl.umap(adata, color='tissue_annotation_pathologist', show=False, ax=axs[0], legend_loc='none')
+    axs[0].set_title("UMAP")
+
+    # plot Spatial scatter
+    sq.pl.spatial_scatter(adata, ax=axs[1], color="tissue_annotation_pathologist", img=False, size=2)
+    axs[1].set_title("Spatial")
+
+    plt.tight_layout()
+    plt.savefig("combined_umap_spatial.png", bbox_inches='tight')
+
 
 
 
@@ -303,7 +325,7 @@ parser = argparse.ArgumentParser(description="Spatial transcriptomic data analys
 parser.add_argument("-i", "--input", required=True, help="path to input Visium HD data")
 parser.add_argument("-f", "--format", default='VisiumHD', help="input format, VisiumHD (default) | csv | h5ad (Anndata object for subclustering with --clusters CLUSTERS)")
 parser.add_argument("-o", "--output", default='./', help="path to output directory, default='./'")
-parser.add_argument("-p", "--pathologist", required=True, help="csv file path to pathologist annotation.")
+parser.add_argument("-p", "--pathologist", default='none', help="csv file path to pathologist annotation.")
 parser.add_argument("--impute", action="store_true", help="do imputation. default: no")
 parser.add_argument("-r", "--resolution", type=float, default=0.8, help="resolution for clustering, default=0.8")
 parser.add_argument("--species", default="human", help="sample species. Options: human (default) | mouse")
@@ -332,6 +354,8 @@ adata = clustering(adata, resolution=args.resolution)
 groups = sorted(adata.obs['leiden'].unique(), key=int)
 adata = annotation(adata, groups, args.species, args.output, args.cpus)
 adata = findDEG(adata, groups, args.output)
+if args.pathologist != "none":
+    pathologist_plot(adata)
 
 # plot tissue and annotation spatial plot (save in pdf)
 #sc.pl.spatial(adata,color="leiden",size=2,alpha=1,alpha_img=0.3)
