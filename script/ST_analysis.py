@@ -6,6 +6,7 @@ Usage:
 python3 ST_analysis.py -i /media/data1/PhD/ChingYaLin/VisiumHD_Colon/binned_outputs/square_008um \
                 -o /media/data1/PhD/ChingYaLin/ST_analysis_test/write_first \
                 -p /media/data1/PhD/ChingYaLin/VisiumHD_Colon/8um_squares_annotation_pathologist.csv \
+                -t Neoplasm \
                 -r 0.6 \
                 --cpus 4
 """
@@ -156,6 +157,62 @@ def preprocessing(adata, impute = False):
     print('Preprocessing...Done')
     return adata
 
+def autoResolution(adata):
+    print("Automatically determine clustering resolution...")   
+    start = time.time()    
+    rep_n = 3
+    sample_n = len(adata.obs)
+    subsample_n = min(5000,int(sample_n))
+    resolutions = np.linspace(0.1, 1.5, 15)
+    silhouette_avg = {}
+    np.random.seed(1)
+    best_resolution = 0
+    highest_sil = 0
+    for r in resolutions:
+        r = np.round(r, 1)
+        print("Clustering test: resolution = ", r)
+        sub_start = time.time()
+        score_list = []
+        for i in range(rep_n):
+            random_indices = np.random.choice(adata.obs_names, size=subsample_n, replace=False)
+            subadata = adata[random_indices].copy()
+            sc.pp.neighbors(subadata, n_neighbors=15, n_pcs=20)
+            sc.tl.leiden(subadata, resolution=r, flavor="igraph")
+            X = subadata.obsm["X_pca"][:, :20]
+            labels = subadata.obs['leiden']
+            if len(set(labels)) <= 1:
+                print(f"Warning: Only one cluster found at resolution={r}, replicate={i}. Skipping silhouette.")
+                continue
+            score = silhouette_score(X, labels)
+            score_list.append(score)
+        
+        silhouette_avg[str(r)] = np.mean(score_list)
+        if silhouette_avg[str(r)] > highest_sil:
+            highest_sil = silhouette_avg[str(r)]
+            best_resolution = r
+        print("robustness score = ", silhouette_avg[str(r)])
+        sub_end = time.time()
+        print(f'time: {sub_end - sub_start}')
+        print()
+
+    print("resolution with highest score: ", best_resolution)
+    res = best_resolution
+    sc.tl.leiden(adata, resolution=best_resolution, flavor="igraph")
+    # write silhouette record to uns and remove the clustering results except for the one with the best resolution
+    adata.uns['sihouette score'] = silhouette_avg
+    # draw lineplot
+    df_sil = pd.DataFrame(list(silhouette_avg.values()), columns=['silhouette score'], index=[float(x) for x in silhouette_avg.keys()])
+    df_sil.plot.line(style='.-', color='green', title='Auto Resolution', xticks=resolutions, xlabel='resolution', ylabel='silhouette score', legend=False)
+    plt.xticks(resolutions)
+    plt.tight_layout()
+    plt.savefig(os.path.join(figure_save, 'Auto_resolution.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    end = time.time()
+    print(f'time: {end-start}')
+    return adata, res
+
+
+
 def clustering(adata, resolution):
     print("Clustering...")
     sc.pp.neighbors(adata, n_neighbors=15, n_pcs=20)
@@ -303,7 +360,7 @@ def findDEG(adata, groups, output):
 
     return adata
 
-def pathologist_plot(adata):
+def pathologist_plot(adata, ratio_taget, output):
     fig, axs = plt.subplots(1, 2, figsize=(10, 5), dpi=300)
 
     # plot umap
@@ -315,7 +372,30 @@ def pathologist_plot(adata):
     axs[1].set_title("Spatial")
 
     plt.tight_layout()
-    plt.savefig("combined_umap_spatial.png", bbox_inches='tight')
+    fig.savefig(os.path.join(figure_save, 'combined_umap_spatial.png'), dpi=300, bbox_inches='tight', transparent=False)
+    plt.close()
+
+    # Calculate the cluster's tumor ratio with pathologist annotation
+    leiden = adata.obs['leiden']
+    annotation = adata.obs['tissue_annotation_pathologist']
+    df = pd.DataFrame({'leiden': leiden, 'annotation': annotation})
+    total_per_cluster = df['leiden'].value_counts().sort_index()
+    neoplasm_per_cluster = df[df['annotation'] == ratio_taget]['leiden'].value_counts().sort_index()
+    ratio_table = pd.DataFrame({'total_spots': total_per_cluster,'pathologist_cancer_spots': neoplasm_per_cluster})
+    ratio_table = ratio_table.fillna(0).astype(int)
+    ratio_table['cancer_spot_ratio'] = ratio_table['pathologist_cancer_spots'] / ratio_table['total_spots']
+    ratio_table.to_csv(os.path.join(output, 'pathologist_annotation_inCluster_ratio.csv'))
+
+    fig, ax = plt.subplots(dpi=300, figsize=(5, 5))
+    ratio_table['cancer_spot_ratio'].plot(kind='bar')
+    plt.axhline(y=0.8, color='red', linestyle='--', linewidth=1)  # 紅色虛線
+    plt.ylabel('Proportion of Cancer spots')
+    plt.xlabel('Leiden Cluster')
+    plt.title('Proportion of cancer spots in Each Leiden Cluster')
+    plt.tight_layout()
+    fig.savefig(os.path.join(figure_save, 'pathologist_annotation_ratio.png'), dpi=300, bbox_inches='tight', transparent=False)
+    plt.close()
+    
 
 
 
@@ -326,6 +406,7 @@ parser.add_argument("-i", "--input", required=True, help="path to input Visium H
 parser.add_argument("-f", "--format", default='VisiumHD', help="input format, VisiumHD (default) | csv | h5ad (Anndata object for subclustering with --clusters CLUSTERS)")
 parser.add_argument("-o", "--output", default='./', help="path to output directory, default='./'")
 parser.add_argument("-p", "--pathologist", default='none', help="csv file path to pathologist annotation.")
+parser.add_argument("-t", "--pathologist_target", default="Neoplasm", help = "the target of pathologist annotation that indicate tumor, default='Neoplasm'")
 parser.add_argument("--impute", action="store_true", help="do imputation. default: no")
 parser.add_argument("-r", "--resolution", type=float, default=0.8, help="resolution for clustering, default=0.8")
 parser.add_argument("--species", default="human", help="sample species. Options: human (default) | mouse")
@@ -355,7 +436,7 @@ groups = sorted(adata.obs['leiden'].unique(), key=int)
 adata = annotation(adata, groups, args.species, args.output, args.cpus)
 adata = findDEG(adata, groups, args.output)
 if args.pathologist != "none":
-    pathologist_plot(adata)
+    pathologist_plot(adata, args.pathologist_target, args.output)
 
 # plot tissue and annotation spatial plot (save in pdf)
 #sc.pl.spatial(adata,color="leiden",size=2,alpha=1,alpha_img=0.3)
