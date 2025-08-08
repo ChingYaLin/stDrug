@@ -33,6 +33,13 @@ from sklearn.metrics import silhouette_score # for esrimate the cluster quality
 import argparse, os, sys
 import time
 import warnings
+import pickle
+import math
+from os import listdir
+from os.path import isfile, join
+import collections
+from lifelines.statistics import logrank_test
+from lifelines import KaplanMeierFitter, CoxPHFitter
 
 
 ### Function part
@@ -213,29 +220,24 @@ def autoResolution(adata):
 
 
 
-def clustering(adata, resolution):
+def clustering(adata, resolution, auto_reso):
     print("Clustering...")
     sc.pp.neighbors(adata, n_neighbors=15, n_pcs=20)
     sc.tl.umap(adata)
 
-    print(f"Clustering with resolution = {resolution}")
-    # Leiden cluster
-    sc.tl.leiden(adata,resolution=0.8, flavor="igraph") # if set random_state=0 can reproduce the clustering results.
-
-    '''
-    if args.auto_resolution:
+    # Whether use auto-resolution selection
+    if auto_reso:
         adata, res = autoResolution(adata)
     else:
-        print("Clustering with resolution = ", args.resolution)
-        sc.tl.louvain(adata, resolution=args.resolution)
-        res = args.resolution
-    '''
+        print(f"Clustering with resolution = {resolution}")
+        sc.tl.leiden(adata,resolution, flavor="igraph") # if set random_state=0 can reproduce the clustering results.
+        res = resolution
     
     print('Exporting UMAP...')
     fig, ax = plt.subplots(dpi=300, figsize=(12,12))
     sc.pl.umap(adata, color='leiden', ax=ax, legend_loc='on data',
            frameon=False, legend_fontsize='small', legend_fontoutline=2, legend_fontweight='normal',
-           use_raw=False, show=False, title='leiden, resolution='+str(resolution))
+           use_raw=False, show=False, title='leiden, resolution='+str(res))
     
     fig.savefig(os.path.join(figure_save, '1.uamp_with_cluster.png'), dpi=300, bbox_inches='tight')
     plt.close()
@@ -396,6 +398,297 @@ def pathologist_plot(adata, ratio_taget, output):
     fig.savefig(os.path.join(figure_save, 'pathologist_annotation_ratio.png'), dpi=300, bbox_inches='tight', transparent=False)
     plt.close()
     
+def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
+    import gseapy as gp
+
+    print('Running GSEAPY...')
+    start = time.time()
+    
+    with open('./data/GO_Biological_Process_2021.pkl', 'rb') as handle:
+        gene_sets = pickle.load(handle)
+
+    df_list = []
+    cluster_list = []
+    celltypes = sorted(adata.obs[group_by].unique())
+
+    for celltype in celltypes:
+        degs = sc.get.rank_genes_groups_df(adata, group=celltype, key='rank_genes_groups', log2fc_min=logfc_threshold, 
+                                    pval_cutoff=cutoff)['names'].squeeze()
+        if isinstance(degs, str):
+            degs = [degs.strip()]
+        else:
+            degs = degs.str.strip().tolist()
+        
+        if not degs:
+            continue
+
+        enr = gp.enrichr(gene_list=degs,
+                gene_sets=gene_sets,
+                no_plot=True
+                )
+        if (enr is not None) and hasattr(enr, 'res2d') and (enr.res2d.shape[0] > 0):
+            df_list.append(enr.res2d)
+            cluster_list.append(celltype)
+
+    columns = ['Cluster', 'Gene_set', 'Term', 'Overlap', 'P-value', 'Adjusted P-value', 'Genes']
+
+    df = pd.DataFrame(columns = columns)
+    for cluster_ind, df_ in zip(cluster_list, df_list):
+        df_ = df_[df_['Adjusted P-value'] <= cutoff]
+        df_ = df_.assign(Cluster = cluster_ind)
+        if (df_.shape[0] > 0):
+            df = pd.concat([df, df_[columns]], sort=False)
+            df_tmp = df_.loc[:, ['Term', 'Adjusted P-value']][:min(10, df_.shape[0])]
+            df_tmp['Term'] = [x.split('(',1)[0] for x in df_tmp['Term']]
+            df_tmp['-log_adj_p'] = - np.log10(df_tmp['Adjusted P-value'])
+            df_tmp = df_tmp.sort_values(by='-log_adj_p', ascending=True)
+            ax = df_tmp.plot.barh(y='-log_adj_p', x='Term', legend=False, grid=False, figsize=(12,4))
+            ax.set_title('Cluster {}'.format(cluster_ind))
+            ax.set_ylabel('')
+            ax.set_xlabel('-log(Adjusted P-value)')
+            fig = ax.figure
+            fig.savefig(os.path.join(figure_save, f'GSEA_cluster{cluster_ind}.png'), dpi=300, bbox_inches='tight', transparent=False)
+            plt.close()
+        else:
+            print('No pathway with an adjusted P-value less than the cutoff (={}) for cluster {}'.format(cutoff, cluster_ind))
+    df.to_csv(os.path.join(output, 'GSEA_results.csv'))
+
+    end = time.time()
+    print('time: {}', end-start)
+
+### Survival analysis
+def getBulkProfile(bulkpath, gencode_table):
+    bk_gep = pd.read_csv(bulkpath, sep=',', compression='gzip')
+    bk_gep_name = bk_gep.merge(gencode_table, how='left', on='id')
+    bk_gep_name.drop_duplicates(subset='name', inplace=True)
+    bk_gep_name = bk_gep_name.set_index('name')
+    bk_gep_name = bk_gep_name.drop(columns=['id'])
+    return bk_gep_name
+
+def getSpecCellDict(bk_gep_name, dict_deg):
+    col_dict = {}
+    for gene in bk_gep_name.index:
+        median = bk_gep_name.loc[gene, :].median()
+        col_dict[gene] = bk_gep_name.loc[gene, :] >= median
+    score_table = pd.DataFrame(col_dict).T
+
+    values_list = []
+    for sample in score_table.columns:
+        values = []
+        for _, genes in dict_deg.items():
+            values.append(score_table.loc[genes, sample].sum())
+        values_list.append(values)
+
+    spec_score_table = pd.DataFrame(values_list, index=score_table.columns, columns=dict_deg.keys())
+
+    dict_low = spec_score_table.quantile(q=0.25)
+    dict_high = spec_score_table.quantile(q=0.75)
+
+    dict_celltype = collections.defaultdict(lambda: collections.defaultdict(dict))
+    for c in spec_score_table.columns:
+        dict_celltype[c]['high'] = spec_score_table.index[spec_score_table[c] >= dict_high[c]].tolist()
+        dict_celltype[c]['low'] = spec_score_table.index[spec_score_table[c] <= dict_low[c]].tolist()
+
+    return dict_celltype
+
+def drawSurvivalPlot(dict_celltype, clinical_df, project_id):
+    n_types = len(dict_celltype.keys())
+    n_cols = 3
+    n_rows = math.ceil(n_types / n_cols)
+    dict_group = {'high': 1, 'low': 0}
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=(2.5 * n_cols, 2.5 * n_rows))
+    axs = axs.flatten() if n_rows * n_cols > 1 else [axs]  # 保證 axs 是 1D array
+    i_ax = 0
+
+    alpha_val = 0.05
+    cph_selected_cols = ['project', 'cell type', 'coef', 'exp(coef)', 'se(coef)', 'coef lower 95%', 'coef upper 95%',
+                         'exp(coef) lower 95%', 'exp(coef) upper 95%', 'z', 'p', '-log2(p)']
+    df_hazard = pd.DataFrame(columns=cph_selected_cols)
+
+    for c in sorted(dict_celltype.keys(), key=int):
+        if i_ax >= len(axs):
+            break
+        ax = axs[i_ax]
+        i_ax += 1
+
+        dict_km = {'time': [], 'died': [], 'group': [], 'abundance': []}
+        for g in ['high', 'low']:
+            patients = [x for x in dict_celltype[c][g] if x in clinical_df.index]
+
+            death_time = pd.to_numeric(
+                clinical_df.loc[patients, '_event_time_'],
+                errors='coerce'
+            ).fillna(0).astype(int).tolist()
+
+            died_series = clinical_df.loc[patients, 'days_to_death']
+            died_flags = died_series.notna() & (died_series != '')  # 判斷是否為死亡事件
+            dict_km['died'].extend(died_flags.astype(int).tolist())
+
+            dict_km['time'].extend(death_time)
+            dict_km['group'].extend([g] * len(death_time))
+            dict_km['abundance'].extend([dict_group[g]] * len(death_time))
+
+        df = pd.DataFrame(dict_km)
+
+        # 確保欄位皆為數值型態
+        df = df.astype({'time': int, 'died': int, 'abundance': int})
+
+        T = df['time']
+        E = df['died']
+        dem = (df['group'] == 'high')
+
+        # Kaplan-Meier plot
+        kmf = KaplanMeierFitter(alpha=alpha_val)
+        kmf.fit(T[dem], event_observed=E[dem], label='High')
+        kmf.plot_survival_function(ax=ax, ci_show=False)
+        kmf.fit(T[~dem], event_observed=E[~dem], label='Low')
+        kmf.plot_survival_function(ax=ax, ci_show=False)
+
+        out_lr = logrank_test(T[dem], T[~dem], E[dem], E[~dem], alpha=1 - alpha_val)
+        p_value = out_lr.p_value
+
+        # Cox regression
+        df.drop(['group'], axis=1, inplace=True)
+        cph = CoxPHFitter()
+        cph.fit(df, duration_col='time', event_col='died', show_progress=False)
+        hr = cph.hazard_ratios_.values[0]
+        dict_tmp = cph.summary.to_dict(orient='records')[0]
+        dict_tmp['project'] = project_id
+        dict_tmp['cell type'] = c
+        df_new_row = pd.DataFrame([dict_tmp]).dropna(axis=1, how='all')
+        df_hazard = pd.concat([df_hazard, df_new_row], ignore_index=True)  
+
+        ax.set_title(f'C{c} (Log-rank P={p_value:.2f}, HR={hr:.2f})', fontsize=8, y=1.08)
+
+    # 刪除空白 subplot
+    for j in range(i_ax, len(axs)):
+        fig.delaxes(axs[j])
+
+    fig.suptitle('Survival Analysis: ' + project_id.rsplit('-', 1)[1], fontsize=12, y=1)
+    fig.tight_layout()
+    plot_name = 'survival_analysis_'+project_id.rsplit('-', 1)[1]+'.png'
+    fig.savefig(os.path.join(figure_save, plot_name), dpi=300, bbox_inches='tight')
+    plt.close('all')
+
+    return df_hazard
+
+def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id):
+    print('Survival Analysis...')
+
+    # 判斷是否要排除已接受治療的樣本（由 args.not_treated 控制）
+    if no_treat:
+        treatment_status = 'no'
+    else:
+        treatment_status = ''
+
+    # 取得所有可用的 TCGA project 檔名（不含 .csv.gz）
+    project_ids = [f.rsplit('.csv',1)[0] for f in listdir(tcga) if isfile(join(tcga, f)) and f.startswith('TCGA')]
+
+    # 若 user 有指定特定 project id，確認是否存在
+    if id:
+        if not id in project_ids:
+            print(f"Cannot find the TCGA file for the specified project_id: {id}\nCandidates:{project_ids}")
+            return adata
+
+    # 讀取 GENCODE gene id → gene name 對照表
+    gencode_table = pd.read_csv(gencode, names=['id','name'])
+
+    # 讀取 TCGA 臨床生存資料（包含 death time、follow-up 等）
+    clinical_df_all = pd.read_csv(clinicalpath, sep='\t', index_col=0)
+
+    # 欲保留的 Cox regression hazard 結果欄位
+    cph_selected_cols = ['project', 'cell type', 'coef', 'exp(coef)', 'se(coef)', 
+                         'coef lower 95%', 'coef upper 95%', 'exp(coef) lower 95%', 
+                         'exp(coef) upper 95%', 'z', 'p', '-log2(p)']
+    df_hazard = pd.DataFrame(columns=cph_selected_cols)
+
+    # 判斷是全部 project 還是 user 指定某一個
+    run_project_ids = project_ids if not id else [id]
+
+    for project_id in run_project_ids:
+        print(project_id)
+
+        # 讀取 TCGA bulk GEP，並將 Ensembl ID 映射成 gene name
+        bk_gep_name = getBulkProfile(f'{tcga}/{project_id}.csv.gz', gencode_table)
+        
+
+        # 針對每個 cluster 抽出 top 20 DEGs（排除 MT 基因與不在 TCGA GEP 中的基因）
+        dict_deg = {}
+        all_degs = []
+        for celltype in adata.obs['leiden'].unique().tolist():
+            degs = [x for x in adata.uns['rank_genes_groups']['names'][celltype] 
+                    if not (x.startswith('MT-') or not x in bk_gep_name.index)][:20]
+            dict_deg[celltype] = degs
+            all_degs.extend(degs)
+        all_degs = list(set(all_degs))  # 移除重複基因
+
+        # 將 TCGA bulk 表現矩陣只保留有用的 DEG
+        bk_gep_name = bk_gep_name.loc[all_degs, :]
+
+        # 根據是否排除 treated，過濾對應的臨床資料
+        if treatment_status == 'no':
+            clinical_df = clinical_df_all[(clinical_df_all['project_id'] == project_id) & 
+                                          (clinical_df_all['isTreated'] == treatment_status)].copy()
+        else:
+            clinical_df = clinical_df_all[clinical_df_all['project_id'] == project_id].copy()
+
+        # 過濾 TCGA bulk GEP 欄位，只保留 clinical info 中有的 sample
+        bk_gep_name = bk_gep_name.loc[:, 
+                        [x for x in clinical_df['case_submitter_id'].tolist() if x in bk_gep_name.columns]]
+
+        # 若病人數不足，跳過該 project
+        if bk_gep_name.shape[1] < 10:
+            print(f'Skipped: the number of {project_id} patients (treated: {treatment_status}) is less than 10.')
+            continue
+
+        # 補上生存時間欄位：優先用 days_to_death，若沒有則用 follow-up
+        clinical_df['_event_time_'] = clinical_df['days_to_death']
+        for ind in clinical_df.index:
+            if not clinical_df.loc[ind, '_event_time_'].isnumeric():
+                clinical_df.loc[ind, '_event_time_'] = clinical_df.loc[ind, 'days_to_last_follow_up']
+
+        # 根據 DEGs 與 TCGA bulk expression，定義 high/low 表現的病人群體
+        dict_celltype = getSpecCellDict(bk_gep_name, dict_deg)
+
+        # 計算 hazard ratio、畫生存圖
+        df_new_hazard = pd.DataFrame()
+        try:
+            df_new_hazard = drawSurvivalPlot(dict_celltype, clinical_df, project_id)
+            df_new_hazard.iloc[:,2:] = df_new_hazard.iloc[:,2:].round(2)
+
+                # 畫表格圖，並儲存成 PDF
+            fig, ax = plt.subplots()
+            fig.patch.set_visible(False)
+            ax.axis('off')
+            ax.axis('tight')
+            table = ax.table(cellText=df_new_hazard.iloc[:,1:].values,
+                                colLabels=df_new_hazard.columns[1:], loc='center')
+            table.auto_set_font_size(False)
+            table.auto_set_column_width(col=list(range(len(df_new_hazard.columns[1:]))))
+            table.set_fontsize(8)
+            for cell in table._cells:
+                if cell[0] == 0:
+                    table._cells[cell].set_fontsize(6)
+                    table._cells[cell].set_color('lightblue')
+                    table._cells[cell].set_height(.05)
+
+            ax.set_title(project_id, y=1.08)
+            fig.tight_layout()
+            filename = 'survival_table_'+project_id
+            fig.savefig(os.path.join(figure_save, filename), dpi=300, bbox_inches='tight')
+            plt.close('all')
+        except Exception as e:
+            print(e)
+            print(f'Survival analysis failed for {project_id}. The reason might be that the abundances, when conditioned on the presence or absence of death events, have very low variance and thus fail to converge.')
+            continue
+        else:
+            df_hazard = pd.concat([df_hazard, df_new_hazard], ignore_index=True, join="inner")
+
+    # 儲存全部 survival analysis 的結果
+    adata.uns['survival_analysis'] = df_hazard
+    df_hazard.to_csv(f'{output}/HR_{treatment_status}.csv')
+
+    return adata
 
 
 
@@ -409,16 +702,35 @@ parser.add_argument("-p", "--pathologist", default='none', help="csv file path t
 parser.add_argument("-t", "--pathologist_target", default="Neoplasm", help = "the target of pathologist annotation that indicate tumor, default='Neoplasm'")
 parser.add_argument("--impute", action="store_true", help="do imputation. default: no")
 parser.add_argument("-r", "--resolution", type=float, default=0.8, help="resolution for clustering, default=0.8")
+parser.add_argument("--auto-resolution", action="store_true", help="automatically determine resolution for clustering")
 parser.add_argument("--species", default="human", help="sample species. Options: human (default) | mouse")
 parser.add_argument("--cpus", default=1, type=int, help="number of CPU used for auto-resolution and annotation, default=1")
 parser.add_argument("-c", "--clusters", default=None, help="perform single cell analysis only on specified clusters, e.g. '1,3,8,9'")
 parser.add_argument("--cname", default='leiden', help="which variable should be used when selecting clusters; required when clusters are provided. Default: 'leiden'")
+parser.add_argument("--gsea", action="store_true", help="perform gene set enrichment analysis (GSEA)")
+parser.add_argument("--survival", action="store_true", help="perform survival analysis")
+parser.add_argument("--tcga", default='/stDrug/data/TCGA/', help="path to TCGA data")
+parser.add_argument("--id", default=None, help='Specify TCGA project id in the format "TCGA-xxxx", e.g., "TCGA-LIHC"')
+parser.add_argument("--not_treated", action="store_true", help='only consider untreated samples from TCGA for survival analysis.')
 
 
 
 ### Read input
 global args
 args = parser.parse_args()
+
+# check option
+if args.survival:
+    if not os.path.isdir(args.tcga):
+            sys.exit("The path to TCGA files does not exist.")
+    if not os.path.isfile(f'{args.tcga}/clinical.tsv'):
+        sys.exit("The TCGA clinical file does not exist.")
+    else:
+        clinicalpath = f'{args.tcga}/clinical.tsv'
+    if not os.path.isfile(f'{args.tcga}/gencode.v22.annotation.id.name.gtf'):
+        sys.exit("The gencode file for id conversion does not exist.")
+    else:
+        gencode = f'{args.tcga}/gencode.v22.annotation.id.name.gtf'
 
 
 # read input files
@@ -430,13 +742,17 @@ results_file = os.path.join(args.output, 'scanpyobj.h5ad')
 ### Main
 adata = readFile(args.input, args.pathologist)
 adata = preprocessing(adata, impute = args.impute)
-adata = clustering(adata, resolution=args.resolution)
+adata = clustering(adata, args.resolution, args.auto_resolution)
 
 groups = sorted(adata.obs['leiden'].unique(), key=int)
 adata = annotation(adata, groups, args.species, args.output, args.cpus)
 adata = findDEG(adata, groups, args.output)
 if args.pathologist != "none":
     pathologist_plot(adata, args.pathologist_target, args.output)
+if args.gsea:
+    runGSEAPY(adata, args.output)
+if args.survival:
+    adata = survivalAnalysis(adata, clinicalpath, gencode, args.tcga, args.not_treated, args.id)
 
 # plot tissue and annotation spatial plot (save in pdf)
 #sc.pl.spatial(adata,color="leiden",size=2,alpha=1,alpha_img=0.3)
