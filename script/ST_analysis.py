@@ -95,7 +95,7 @@ def readFile(input_path, pathologist_path):
         else:
             sys.exit(f"{args.cname} cannot be found in data.")
     end = time.time()
-    print('time: {}', end-start)
+    print(f'time: {end-start}')
     return adata
 
 def preprocessing(adata, impute = False):
@@ -148,7 +148,7 @@ def preprocessing(adata, impute = False):
         sc.external.pp.magic(adata)
         adata.raw = bk_adata_raw
         end = time.time()
-        print('time: {}', end-start)
+        print(f'time: {end-start}')
 
     print("Find highly variable genes")
     sc.pp.highly_variable_genes(adata)
@@ -218,8 +218,6 @@ def autoResolution(adata):
     print(f'time: {end-start}')
     return adata, res
 
-
-
 def clustering(adata, resolution, auto_reso):
     print("Clustering...")
     sc.pp.neighbors(adata, n_neighbors=15, n_pcs=20)
@@ -251,6 +249,19 @@ def clustering(adata, resolution, auto_reso):
     print("Clustering...Done")
 
     return adata
+
+def writeGEP(adata_GEP, output):
+    print('Exporting GEP...')
+    sc.pp.normalize_total(adata_GEP, target_sum=1e6)
+    mat = adata_GEP.X.transpose()
+    if type(mat) is not np.ndarray:
+        mat = mat.toarray()
+    GEP_df = pd.DataFrame(mat, index=adata_GEP.var.index)
+    GEP_df.columns = adata.obs['leiden'].tolist()
+    # GEP_df = GEP_df.loc[adata.var.index[adata.var.highly_variable==True]]
+    GEP_df.dropna(axis=1, inplace=True)
+    GEP_df.to_csv(os.path.join(output, 'GEP.txt'), sep='\t')
+    print('Epxporting GEP...Done')
 
 def annotation(adata, groups, species, output, cpus):
     if not adata.raw:
@@ -331,6 +342,7 @@ def annotation(adata, groups, species, output, cpus):
 
         # Spatial plot with annotation
         fig, ax = plt.subplots(dpi=300, figsize=(5, 5))
+        adata.uns.pop('cell_type_colors', None)
         sq.pl.spatial_scatter(adata, ax=ax, color="cell_type",img= False, size=2)
         fig.savefig(os.path.join(figure_save, '5.tissue_with_annotation.png'), dpi=300, bbox_inches='tight', transparent=False)
         plt.close()
@@ -404,7 +416,7 @@ def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
     print('Running GSEAPY...')
     start = time.time()
     
-    with open('./data/GO_Biological_Process_2021.pkl', 'rb') as handle:
+    with open('./../data/GO_Biological_Process_2021.pkl', 'rb') as handle:
         gene_sets = pickle.load(handle)
 
     df_list = []
@@ -454,7 +466,7 @@ def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
     df.to_csv(os.path.join(output, 'GSEA_results.csv'))
 
     end = time.time()
-    print('time: {}', end-start)
+    print(f'time: {end-start}')
 
 ### Survival analysis
 def getBulkProfile(bulkpath, gencode_table):
@@ -572,7 +584,7 @@ def drawSurvivalPlot(dict_celltype, clinical_df, project_id):
 
     return df_hazard
 
-def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id):
+def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id, output):
     print('Survival Analysis...')
 
     # 判斷是否要排除已接受治療的樣本（由 args.not_treated 控制）
@@ -690,9 +702,6 @@ def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id):
 
     return adata
 
-
-
-
 ### process arguments
 parser = argparse.ArgumentParser(description="Spatial transcriptomic data analysis")
 parser.add_argument("-i", "--input", required=True, help="path to input Visium HD data")
@@ -707,6 +716,8 @@ parser.add_argument("--species", default="human", help="sample species. Options:
 parser.add_argument("--cpus", default=1, type=int, help="number of CPU used for auto-resolution and annotation, default=1")
 parser.add_argument("-c", "--clusters", default=None, help="perform single cell analysis only on specified clusters, e.g. '1,3,8,9'")
 parser.add_argument("--cname", default='leiden', help="which variable should be used when selecting clusters; required when clusters are provided. Default: 'leiden'")
+parser.add_argument("--GEP", action="store_true", help=' generate Gene Expression Profile file.')
+parser.add_argument("--annotation", action="store_true", help="perform cell type annotation")
 parser.add_argument("--gsea", action="store_true", help="perform gene set enrichment analysis (GSEA)")
 parser.add_argument("--survival", action="store_true", help="perform survival analysis")
 parser.add_argument("--tcga", default='/stDrug/data/TCGA/', help="path to TCGA data")
@@ -745,14 +756,22 @@ adata = preprocessing(adata, impute = args.impute)
 adata = clustering(adata, args.resolution, args.auto_resolution)
 
 groups = sorted(adata.obs['leiden'].unique(), key=int)
-adata = annotation(adata, groups, args.species, args.output, args.cpus)
+if args.GEP: 
+    writeGEP(adata.raw.to_adata(), args.output)
+
+if args.annotation:
+    if args.species not in ['human', 'mouse']:
+        print('Invalid species: {}. Use human instead.'.format(args.species))
+        args.species = 'human'
+    adata = annotation(adata, groups, args.species, args.output, args.cpus)
+    
 adata = findDEG(adata, groups, args.output)
 if args.pathologist != "none":
     pathologist_plot(adata, args.pathologist_target, args.output)
 if args.gsea:
     runGSEAPY(adata, args.output)
 if args.survival:
-    adata = survivalAnalysis(adata, clinicalpath, gencode, args.tcga, args.not_treated, args.id)
+    adata = survivalAnalysis(adata, clinicalpath, gencode, args.tcga, args.not_treated, args.id, args.output)
 
 # plot tissue and annotation spatial plot (save in pdf)
 #sc.pl.spatial(adata,color="leiden",size=2,alpha=1,alpha_img=0.3)
@@ -762,5 +781,7 @@ if args.survival:
 
 if args.clusters:
     results_file = '{}.sub.h5ad'.format(results_file.rsplit('.',1)[0])
+if 'features' in adata.var.columns:
+    adata.var.index = adata.var['features']
 # save h5ad file
 adata.write(results_file)
