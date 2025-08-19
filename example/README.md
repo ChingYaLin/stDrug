@@ -31,3 +31,10 @@ python3 ST_analysis.py -i /media/data1/PhD/ChingYaLin/ST_analysis_test/write_fir
                 --id TCGA-COAD \
                 --not_treated
 ```
+
+## drug response prediction.py
+```
+python3 drug_response_prediction.py \
+    -i /media/data1/PhD/ChingYaLin/ST_analysis_test/write_sub/scanpyobj.sub.h5ad \
+    -o /media/data1/PhD/ChingYaLin/ST_analysis_test/
+```

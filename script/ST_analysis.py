@@ -7,8 +7,14 @@ python3 ST_analysis.py -i /media/data1/PhD/ChingYaLin/VisiumHD_Colon/binned_outp
                 -o /media/data1/PhD/ChingYaLin/ST_analysis_test/write_first \
                 -p /media/data1/PhD/ChingYaLin/VisiumHD_Colon/8um_squares_annotation_pathologist.csv \
                 -t Neoplasm \
+                --annotation (optional) \
                 -r 0.6 \
-                --cpus 4
+                --cpus 4 \
+                --survival (optional) \
+                --tcga /media/data1/PhD/ChingYaLin/TCGA_survival_data/TCGA (optional) \
+                --id TCGA-COAD (optional) \
+                --not_treated (optional)
+
 """
 
 ### Package import
@@ -101,6 +107,8 @@ def readFile(input_path, pathologist_path):
 def preprocessing(adata, impute = False):
     """
     The function to preprocess spatial transcriptome data.
+    # Input: adata (unprocessing)
+    # Output: adata (After pre-precessing)
     """
     print('Preprocessing...')
     print(f'adata before filtering: n_obs x n_vars = {adata.n_obs} x {adata.n_vars}')
@@ -119,7 +127,7 @@ def preprocessing(adata, impute = False):
                 ["total_counts", "n_genes_by_counts", "pct_counts_mt"], jitter=0.4, palette="pastel", show=False)
         fig = ax[0].get_figure() if isinstance(ax, list) else ax.get_figure()
         fig.suptitle("QC Metrics Violin Plot")  # setting the title
-        fig.savefig(os.path.join(figure_save, 'QC_metrix_violin_plots.png'), dpi=300, bbox_inches='tight')
+        fig.savefig(os.path.join(figure_save, 'Preprocess-QC_metrix_violin_plots.png'), dpi=300, bbox_inches='tight')
 
     if not (adata.obs.pct_counts_mt == 0).all():
         adata = adata[adata.obs.pct_counts_mt < 30, :]
@@ -165,6 +173,13 @@ def preprocessing(adata, impute = False):
     return adata
 
 def autoResolution(adata):
+    """
+    The function to estimate the best cluster resolution with sihouette score.
+    # Input: adata
+    # Output: 
+        1. adata (After cluster with best resolution)
+        2. res: best resolution that be used to clustering
+    """
     print("Automatically determine clustering resolution...")   
     start = time.time()    
     rep_n = 3
@@ -203,6 +218,7 @@ def autoResolution(adata):
         print()
 
     print("resolution with highest score: ", best_resolution)
+    print("Automatically determine clustering resolution...Done") 
     res = best_resolution
     sc.tl.leiden(adata, resolution=best_resolution, flavor="igraph")
     # write silhouette record to uns and remove the clustering results except for the one with the best resolution
@@ -212,13 +228,22 @@ def autoResolution(adata):
     df_sil.plot.line(style='.-', color='green', title='Auto Resolution', xticks=resolutions, xlabel='resolution', ylabel='silhouette score', legend=False)
     plt.xticks(resolutions)
     plt.tight_layout()
-    plt.savefig(os.path.join(figure_save, 'Auto_resolution.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(figure_save, 'Cluster-Auto_resolution.png'), dpi=300, bbox_inches='tight')
     plt.close()
     end = time.time()
     print(f'time: {end-start}')
     return adata, res
 
 def clustering(adata, resolution, auto_reso):
+    """
+    The function that cluster the data into several group though gene expression.
+    # Input:
+        1. adata
+        2. resolution (int): The resolution that user want. default=0.8.
+        3. auto_reso (bool): Whether autoResolution conduct to find best resolution for cluster. default=False
+    # Output: 
+        1. adata (After cluster)
+    """
     print("Clustering...")
     sc.pp.neighbors(adata, n_neighbors=15, n_pcs=20)
     sc.tl.umap(adata)
@@ -237,20 +262,25 @@ def clustering(adata, resolution, auto_reso):
            frameon=False, legend_fontsize='small', legend_fontoutline=2, legend_fontweight='normal',
            use_raw=False, show=False, title='leiden, resolution='+str(res))
     
-    fig.savefig(os.path.join(figure_save, '1.uamp_with_cluster.png'), dpi=300, bbox_inches='tight')
+    fig.savefig(os.path.join(figure_save, 'Cluster-uamp_with_cluster.png'), dpi=300, bbox_inches='tight')
     plt.close()
     
     print("Exporting spatial plot...")
     # Cluster result on tissue location
     fig, ax = plt.subplots(dpi=300)
     sq.pl.spatial_scatter(adata, color="leiden",fig=fig, ax=ax, img= False, size=2)
-    fig.savefig(os.path.join(figure_save, '2.tissue_with_cluster.png'), dpi=300, bbox_inches='tight', transparent=False)
+    fig.savefig(os.path.join(figure_save, 'Cluster-tissue_with_cluster.png'), dpi=300, bbox_inches='tight', transparent=False)
     plt.close()
     print("Clustering...Done")
 
     return adata
 
 def writeGEP(adata_GEP, output):
+    """
+    The function that output the gene expression profile (need to take a while time)
+    # Input:
+        1. adata_GEP: the adata that want to export
+    """
     print('Exporting GEP...')
     sc.pp.normalize_total(adata_GEP, target_sum=1e6)
     mat = adata_GEP.X.transpose()
@@ -264,6 +294,17 @@ def writeGEP(adata_GEP, output):
     print('Epxporting GEP...Done')
 
 def annotation(adata, groups, species, output, cpus):
+    """
+    The function that annotate the cluster by scMatch
+    # Input:
+        1. adata (after clustering)
+        2. groups
+        3. species (str): human or mouse
+        4. output (str): the path of output file
+        5. cpus (int): how many cpus want to use to annotate
+    # Output:
+        1. adata (after annotation)
+    """
     if not adata.raw:
         print('Skip annotation since the process needs the expression data for all genes.')
     else:
@@ -317,7 +358,7 @@ def annotation(adata, groups, species, output, cpus):
             ncol=1, fontsize=16
         )
         fig.subplots_adjust(right=0.85)  # 給 legend 多一點空間
-        fig.savefig(os.path.join(figure_save, '3.umap_with_cluster(custom).png'), dpi=300, bbox_inches='tight')
+        fig.savefig(os.path.join(figure_save, 'Annotation-umap_with_annotation.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
         # Table: top 5 annotation
@@ -336,16 +377,17 @@ def annotation(adata, groups, species, output, cpus):
 
         ax.set_title('Top 5 annotation')
         fig.subplots_adjust(left=0.1, right=0.9)
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        fig.savefig(os.path.join(figure_save, '4.top_5_annotation.png'), dpi=300, bbox_inches='tight')
+        fig.savefig(os.path.join(figure_save, 'Annotation-top_5_annotation.png'), dpi=300, bbox_inches='tight')
         plt.close()
 
         # Spatial plot with annotation
         fig, ax = plt.subplots(dpi=300, figsize=(5, 5))
         adata.uns.pop('cell_type_colors', None)
         sq.pl.spatial_scatter(adata, ax=ax, color="cell_type",img= False, size=2)
-        fig.savefig(os.path.join(figure_save, '5.tissue_with_annotation.png'), dpi=300, bbox_inches='tight', transparent=False)
+        fig.savefig(os.path.join(figure_save, 'Annotation-tissue_with_annotation.png'), dpi=300, bbox_inches='tight', transparent=False)
         plt.close()
+
+        print('Cell type annotation...Done')
 
     return adata
 
@@ -374,7 +416,14 @@ def findDEG(adata, groups, output):
 
     return adata
 
-def pathologist_plot(adata, ratio_taget, output):
+def pathologist_plot(adata, ratio_target, output):
+    """
+    The function to plot the pathologist's annotation
+    # Input:
+        1. adata (with pathologist's annotation)
+        2. ratio_target (str): Which annotation target want to calculate the ratio
+        3. output (str): The path of output
+    """
     fig, axs = plt.subplots(1, 2, figsize=(10, 5), dpi=300)
 
     # plot umap
@@ -386,7 +435,7 @@ def pathologist_plot(adata, ratio_taget, output):
     axs[1].set_title("Spatial")
 
     plt.tight_layout()
-    fig.savefig(os.path.join(figure_save, 'combined_umap_spatial.png'), dpi=300, bbox_inches='tight', transparent=False)
+    fig.savefig(os.path.join(figure_save, 'Pathologist-pathologist annotation.png'), dpi=300, bbox_inches='tight', transparent=False)
     plt.close()
 
     # Calculate the cluster's tumor ratio with pathologist annotation
@@ -394,7 +443,7 @@ def pathologist_plot(adata, ratio_taget, output):
     annotation = adata.obs['tissue_annotation_pathologist']
     df = pd.DataFrame({'leiden': leiden, 'annotation': annotation})
     total_per_cluster = df['leiden'].value_counts().sort_index()
-    neoplasm_per_cluster = df[df['annotation'] == ratio_taget]['leiden'].value_counts().sort_index()
+    neoplasm_per_cluster = df[df['annotation'] == ratio_target]['leiden'].value_counts().sort_index()
     ratio_table = pd.DataFrame({'total_spots': total_per_cluster,'pathologist_cancer_spots': neoplasm_per_cluster})
     ratio_table = ratio_table.fillna(0).astype(int)
     ratio_table['cancer_spot_ratio'] = ratio_table['pathologist_cancer_spots'] / ratio_table['total_spots']
@@ -407,14 +456,25 @@ def pathologist_plot(adata, ratio_taget, output):
     plt.xlabel('Leiden Cluster')
     plt.title('Proportion of cancer spots in Each Leiden Cluster')
     plt.tight_layout()
-    fig.savefig(os.path.join(figure_save, 'pathologist_annotation_ratio.png'), dpi=300, bbox_inches='tight', transparent=False)
+    fig.savefig(os.path.join(figure_save, 'Pathologist-annotation_ratio.png'), dpi=300, bbox_inches='tight', transparent=False)
     plt.close()
     
 def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
+    """
+    The function to get functional enrichments
+    # Input:
+        1. adata (with pathologist's annotation)
+        2. output (str)
+        3. group_by (str): default=leiden
+        4. cutoff (int): the p value cut off for functional enrichment
+        5. logfc_threshold (int): the threshold of log foldchange
+    """
     import gseapy as gp
 
     print('Running GSEAPY...')
     start = time.time()
+    figure_save_gsea = os.path.join(figure_save, 'gsea')
+    os.makedirs(figure_save_gsea, exist_ok=True) 
     
     with open('./../data/GO_Biological_Process_2021.pkl', 'rb') as handle:
         gene_sets = pickle.load(handle)
@@ -449,7 +509,9 @@ def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
         df_ = df_[df_['Adjusted P-value'] <= cutoff]
         df_ = df_.assign(Cluster = cluster_ind)
         if (df_.shape[0] > 0):
-            df = pd.concat([df, df_[columns]], sort=False)
+            frames = [df, df_[columns]]
+            frames = [f for f in frames if not f.empty and not f.isna().all().all()]
+            df = pd.concat(frames, sort=False)
             df_tmp = df_.loc[:, ['Term', 'Adjusted P-value']][:min(10, df_.shape[0])]
             df_tmp['Term'] = [x.split('(',1)[0] for x in df_tmp['Term']]
             df_tmp['-log_adj_p'] = - np.log10(df_tmp['Adjusted P-value'])
@@ -459,7 +521,7 @@ def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
             ax.set_ylabel('')
             ax.set_xlabel('-log(Adjusted P-value)')
             fig = ax.figure
-            fig.savefig(os.path.join(figure_save, f'GSEA_cluster{cluster_ind}.png'), dpi=300, bbox_inches='tight', transparent=False)
+            fig.savefig(os.path.join(figure_save_gsea, f'GSEA_cluster{cluster_ind}.png'), dpi=300, bbox_inches='tight', transparent=False)
             plt.close()
         else:
             print('No pathway with an adjusted P-value less than the cutoff (={}) for cluster {}'.format(cutoff, cluster_ind))
@@ -467,6 +529,7 @@ def runGSEAPY(adata, output, group_by='leiden', cutoff=0.05, logfc_threshold=2):
 
     end = time.time()
     print(f'time: {end-start}')
+    print('Running GSEAPY...Done')
 
 ### Survival analysis
 def getBulkProfile(bulkpath, gencode_table):
@@ -503,7 +566,7 @@ def getSpecCellDict(bk_gep_name, dict_deg):
 
     return dict_celltype
 
-def drawSurvivalPlot(dict_celltype, clinical_df, project_id):
+def drawSurvivalPlot(dict_celltype, clinical_df, project_id, fig_save_path):
     n_types = len(dict_celltype.keys())
     n_cols = 3
     n_rows = math.ceil(n_types / n_cols)
@@ -568,7 +631,9 @@ def drawSurvivalPlot(dict_celltype, clinical_df, project_id):
         dict_tmp['project'] = project_id
         dict_tmp['cell type'] = c
         df_new_row = pd.DataFrame([dict_tmp]).dropna(axis=1, how='all')
-        df_hazard = pd.concat([df_hazard, df_new_row], ignore_index=True)  
+        frames = [df_hazard, df_new_row]
+        frames = [f for f in frames if not f.empty and not f.isna().all().all()]
+        df_hazard = pd.concat(frames, ignore_index=True) 
 
         ax.set_title(f'C{c} (Log-rank P={p_value:.2f}, HR={hr:.2f})', fontsize=8, y=1.08)
 
@@ -579,13 +644,28 @@ def drawSurvivalPlot(dict_celltype, clinical_df, project_id):
     fig.suptitle('Survival Analysis: ' + project_id.rsplit('-', 1)[1], fontsize=12, y=1)
     fig.tight_layout()
     plot_name = 'survival_analysis_'+project_id.rsplit('-', 1)[1]+'.png'
-    fig.savefig(os.path.join(figure_save, plot_name), dpi=300, bbox_inches='tight')
+    fig.savefig(os.path.join(fig_save_path, plot_name), dpi=300, bbox_inches='tight')
     plt.close('all')
 
     return df_hazard
 
 def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id, output):
+    """
+    The function to conduct survival analysis of each cluster
+    # Input:
+        1. adata
+        2. clinicalpath (str): The tcga clinical data path
+        3. gencode
+        4. tcga
+        5. no_treat (bool): whether use no-treat patients to analysis
+        6. id (str): Which type of cancer specific for survival analysis.
+        7. output
+    # Output:
+        1. adata
+    """
     print('Survival Analysis...')
+    figure_save_survival = os.path.join(figure_save, 'survival')
+    os.makedirs(figure_save_survival, exist_ok=True) 
 
     # 判斷是否要排除已接受治療的樣本（由 args.not_treated 控制）
     if no_treat:
@@ -665,7 +745,7 @@ def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id, output):
         # 計算 hazard ratio、畫生存圖
         df_new_hazard = pd.DataFrame()
         try:
-            df_new_hazard = drawSurvivalPlot(dict_celltype, clinical_df, project_id)
+            df_new_hazard = drawSurvivalPlot(dict_celltype, clinical_df, project_id, figure_save_survival)
             df_new_hazard.iloc[:,2:] = df_new_hazard.iloc[:,2:].round(2)
 
                 # 畫表格圖，並儲存成 PDF
@@ -687,14 +767,16 @@ def survivalAnalysis(adata, clinicalpath, gencode, tcga, no_treat, id, output):
             ax.set_title(project_id, y=1.08)
             fig.tight_layout()
             filename = 'survival_table_'+project_id
-            fig.savefig(os.path.join(figure_save, filename), dpi=300, bbox_inches='tight')
+            fig.savefig(os.path.join(figure_save_survival, filename), dpi=300, bbox_inches='tight')
             plt.close('all')
         except Exception as e:
             print(e)
             print(f'Survival analysis failed for {project_id}. The reason might be that the abundances, when conditioned on the presence or absence of death events, have very low variance and thus fail to converge.')
             continue
         else:
-            df_hazard = pd.concat([df_hazard, df_new_hazard], ignore_index=True, join="inner")
+            frames = [df_hazard, df_new_hazard]
+            frames = [f for f in frames if not f.empty and not f.isna().all().all()]
+            df_hazard = pd.concat(frames, ignore_index=True, join="inner")
 
     # 儲存全部 survival analysis 的結果
     adata.uns['survival_analysis'] = df_hazard
