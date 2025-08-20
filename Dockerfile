@@ -1,7 +1,7 @@
-FROM tensorflow/tensorflow:2.9.1
+FROM tensorflow/tensorflow:2.19.0
 RUN apt-get update && apt-get install -y git unzip wget curl
 RUN pip3 install --upgrade pip cmake
-WORKDIR /scDrug
+WORKDIR /stDrug
 COPY requirements.txt requirements.txt
 RUN pip3 install -r requirements.txt
 COPY . .
@@ -18,9 +18,13 @@ RUN sed -i 's/\.ix/.loc/g' /opt/scMatch/scMatch.py
 RUN sed -i 's/loc\[commonRows, ].fillna(0\.0)/reindex(commonRows, axis="index", fill_value=0.0)/g' /opt/scMatch/scMatch.py
 
 # survival analysis
-RUN wget -q https://figshare.com/ndownloader/files/35612942 -O data/TCGA.zip
-RUN unzip data/TCGA.zip
-RUN rm data/TCGA.zip
+RUN mkdir -p data \
+ && curl -fL --retry 5 --retry-all-errors --max-time 600 \
+      -H "User-Agent: Mozilla/5.0" \
+      "https://figshare.com/ndownloader/files/35612942?download=1" \
+      -o data/TCGA.zip \
+ && unzip -q data/TCGA.zip -d data \
+ && rm data/TCGA.zip
 
 ## CaDRReS-Sc
 RUN git clone https://github.com/CSB5/CaDRReS-Sc.git /opt/CaDRReS-Sc
@@ -34,11 +38,6 @@ RUN wget -q --no-check-certificate 'https://docs.google.com/uc?export=download&i
 
 RUN sed -i 's/import tensorflow as tf/import tensorflow.compat.v1 as tf\ntf.disable_v2_behavior()/g' /opt/CaDRReS-Sc/cadrres_sc/model.py
 RUN sed -i 's/import tensorflow\.python\.util\.deprecation as deprecation/from tensorflow.python.util import deprecation/g' /opt/CaDRReS-Sc/cadrres_sc/model.py
-
-## CIBERSORTx
-RUN curl -fsSL https://get.docker.com -o get-docker.sh
-RUN sh get-docker.sh
-
 
 CMD [ "/bin/bash" ]
 

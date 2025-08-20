@@ -46,17 +46,17 @@ class Drug_Response:
         self.kernel_feature_preparartion()
         self.sensitivity_prediction()
         if args.model == 'GDSC':
-            self.masked_drugs = list(pd.read_csv('/scDrug/data/masked_drugs.csv')['GDSC'].dropna().astype('int64').astype('str'))
+            self.masked_drugs = list(pd.read_csv('/stDrug/data/masked_drugs.csv')['GDSC'].dropna().astype('int64').astype('str'))
             self.cell_death_proportion()
         else:
-            self.masked_drugs = list(pd.read_csv('/scDrug/data/masked_drugs.csv')['PRISM'])
+            self.masked_drugs = list(pd.read_csv('/stDrug/data/masked_drugs.csv')['PRISM'])
         self.output_result()
         self.figure_output()
 
     def load_model(self):
         ### IC50/AUC prediction
         ## Read pre-trained model
-        model_dir = '/scDrug/CaDRReS-Sc-model/'
+        model_dir = '/stDrug/CaDRReS-Sc-model/'
         obj_function = widgets.Dropdown(options=['cadrres-wo-sample-bias', 'cadrres-wo-sample-bias-weight'], description='Objetice function')
         self.model_spec_name = obj_function.value
         if args.model == 'GDSC':
@@ -94,9 +94,15 @@ class Drug_Response:
 
         self.cluster_norm_exp_df = pd.DataFrame(columns=clusters, index=self.adata.raw.var.index)
         for cluster in clusters:
-            self.cluster_norm_exp_df[cluster] =  self.adata.raw.X[self.adata.obs['leiden']==cluster].mean(axis=0).T \
-                                                 if np.sum(self.adata.raw.X[self.adata.obs['leiden']==cluster]) else 0.0
+            Xraw = self.adata.raw.X if (hasattr(self.adata, "raw") and self.adata.raw is not None) else self.adata.X
+            mask = (self.adata.obs['leiden'].to_numpy() == cluster)
+            if mask.any():
+                sub = Xraw[mask, :]                                   # 只在「列」用布林索引
+                col_mean = np.asarray(sub.mean(axis=0)).ravel()        # 稀疏mean回傳1×G，轉成1D
+            else:
+                col_mean = np.zeros(Xraw.shape[1], dtype=float)
 
+            self.cluster_norm_exp_df[cluster] = col_mean
     def kernel_feature_preparartion(self):
         ## Read essential genes list
         if args.model == 'GDSC':

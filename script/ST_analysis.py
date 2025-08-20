@@ -21,15 +21,12 @@ python3 ST_analysis.py -i /media/data1/PhD/ChingYaLin/VisiumHD_Colon/binned_outp
 # Single cell and Spatial transcript analysis
 import scanpy as sc
 import squidpy as sq
-import scipy.sparse 
-from scipy.sparse import csc_matrix # For sparse matrix
 
 # Data processing
 import numpy as np
 import pandas as pd
 
 # Data visualization and export to PDF
-from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -318,7 +315,7 @@ def annotation(adata, groups, species, output, cpus):
         dat = pd.DataFrame(mat, index = adata.raw.var.index, columns = groups)
         dat.to_csv(os.path.join(output, 'cluster_mean_exp.csv'))
         
-        os.system('python /media/data1/PhD/ChingYaLin/scMatch/scMatch.py --refDS /media/data1/PhD/ChingYaLin/scMatch/refDB/FANTOM5 \
+        os.system('python /opt/scMatch/scMatch.py --refDS /opt/scMatch/refDB/FANTOM5 \
                 --dFormat csv --refType {} --testType {} --testDS {} --coreNum {}'.format(
                 species, species, os.path.join( output, 'cluster_mean_exp.csv'), cpus))
         
